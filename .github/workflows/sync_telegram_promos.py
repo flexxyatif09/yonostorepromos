@@ -7,19 +7,22 @@ from bs4 import BeautifulSoup
 import firebase_admin
 from firebase_admin import credentials, db
 
-# Aapka Firebase RTDB URL
 FIREBASE_DATABASE_URL = "https://appstore-9d01f-default-rtdb.asia-southeast1.firebasedatabase.app"
 
 def initialize_firebase():
     service_account_json = os.environ.get("FIREBASE_SERVICE_ACCOUNT")
     if service_account_json:
-        cred_dict = json.loads(service_account_json)
-        cred = credentials.Certificate(cred_dict)
-        firebase_admin.initialize_app(cred, {
-            'databaseURL': FIREBASE_DATABASE_URL
-        })
+        try:
+            cred_dict = json.loads(service_account_json)
+            cred = credentials.Certificate(cred_dict)
+            firebase_admin.initialize_app(cred, {
+                'databaseURL': FIREBASE_DATABASE_URL
+            })
+            print("✅ Firebase initialized successfully.")
+        except Exception as e:
+            print(f"❌ Error initializing Firebase: {e}")
     else:
-        print("Error: FIREBASE_SERVICE_ACCOUNT environment variable missing!")
+        print("❌ Error: FIREBASE_SERVICE_ACCOUNT secret not found!")
 
 def sync_promocodes_only():
     url = "https://t.me/s/YonoGamesofficialCodee"
@@ -40,7 +43,6 @@ def sync_promocodes_only():
     # 1. Pehle database se existing saare promo codes fetch karega
     existing_data = ref.get() or {}
 
-    # Map bana lenge comparison ke liye: { "yono slots": "purana_code", "dhan game": "purana_code" }
     current_codes_map = {}
     for key, val in existing_data.items():
         if isinstance(val, dict):
@@ -68,15 +70,14 @@ def sync_promocodes_only():
             
             clean_app_key = game_name.lower()
 
-            # Check if this app exists in DB
             if clean_app_key in current_codes_map:
                 db_id, existing_code = current_codes_map[clean_app_key]
                 
-                # Check agar code pehle se added hai ya same hai
+                # Check agar code pehle se added hai
                 if existing_code == new_code:
-                    print(f"⏩ [Skip] {game_name}: Code '{new_code}' already exists in DB.")
+                    print(f"⏩ [Skip] {game_name}: Code '{new_code}' already active.")
                 else:
-                    # Sirf CODE aur TIME update karega (Link / Bonus / Description wahi purana rahega)
+                    # Sirf CODE aur DATE update karega
                     ref.child(db_id).update({
                         "code": new_code,
                         "dateAdded": int(time.time() * 1000)
@@ -100,7 +101,7 @@ def sync_promocodes_only():
                     "active": True,
                     "dateAdded": int(time.time() * 1000)
                 })
-                print(f"✨ [NEW GAME ADDED] {game_name}: Code '{new_code}'")
+                print(f"✨ [NEW GAME] {game_name}: Code '{new_code}' added.")
                 current_codes_map[clean_app_key] = (new_id, new_code)
 
 if __name__ == "__main__":
