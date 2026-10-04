@@ -51,14 +51,14 @@ jobs:
                   async for msg in client.iter_messages(ch, limit=25):
                       text = msg.message or msg.text or ""
                       if not text.strip(): continue
-                      g, c, b = parse_promocode(text)
+                      g, c, b, link = parse_promocode(text)
                       if c and c.upper() not in synced_codes:
                           synced_codes.add(c.upper())
-                          print(f"🎯 Extracted Code: {c} | Game: {g} | Bonus: {b}")
-                          sync_to_firebase(g, c, b, text)
+                          print(f"🎯 Extracted Code: \"{c}\" | Game: \"{g}\" | Link: \"{link[:35]}...\"")
+                          sync_to_firebase(g, c, b, link, text)
                           count += 1
                           
-                  print(f"🏁 Finished scanning: {count} promocodes synced & pushed!")
+                  print(f"🏁 Finished scanning: {count} valid promocodes synced & pushed!")
                   if count == 0:
                       print("ℹ️ Checked last 25 messages in channel: No valid promo codes found.")
               except Exception as e:
