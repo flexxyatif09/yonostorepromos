@@ -46,18 +46,21 @@ jobs:
                   ch_title = getattr(ch, "title", "Private Channel")
                   print(f"✅ Found Private Channel: {ch_title} (ID: {TARGET_CHANNEL_ID})")
                   
-                  found_code = False
-                  async for msg in client.iter_messages(ch, limit=15):
+                  synced_codes = set()
+                  count = 0
+                  async for msg in client.iter_messages(ch, limit=25):
                       text = msg.message or msg.text or ""
                       if not text.strip(): continue
                       g, c, b = parse_promocode(text)
-                      if c:
+                      if c and c.upper() not in synced_codes:
+                          synced_codes.add(c.upper())
                           print(f"🎯 Extracted Code: {c} | Game: {g} | Bonus: {b}")
                           sync_to_firebase(g, c, b, text)
-                          found_code = True
-                          break
-                  if not found_code:
-                      print("ℹ️ Checked last 15 messages in channel: No new valid promo code found right now.")
+                          count += 1
+                          
+                  print(f"🏁 Finished scanning: {count} promocodes synced & pushed!")
+                  if count == 0:
+                      print("ℹ️ Checked last 25 messages in channel: No valid promo codes found.")
               except Exception as e:
                   print(f"❌ Error connecting to channel {TARGET_CHANNEL_ID}: {e}")
 
