@@ -43,7 +43,8 @@ jobs:
 
               try:
                   ch = await client.get_entity(TARGET_CHANNEL_ID)
-                  print(f"✅ Found Private Channel: \"{getattr(ch, \"title\", \"\")} \" (ID: {TARGET_CHANNEL_ID})")
+                  ch_title = getattr(ch, "title", "Private Channel")
+                  print(f"✅ Found Private Channel: {ch_title} (ID: {TARGET_CHANNEL_ID})")
                   
                   found_code = False
                   async for msg in client.iter_messages(ch, limit=15):
