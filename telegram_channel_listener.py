@@ -1,4 +1,4 @@
-import os, re, time, requests
+import os, re, time, json, requests
 from datetime import datetime
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
@@ -41,18 +41,15 @@ def parse_promocode(text):
     text_no_http = re.sub(r"https?://\S+", " ", clean_text)
 
     code = ""
-    # Priority A: "Claim >> spingoldg.com" or "Code: winrummy.app"
     m = re.search(r"(?i)(?:claim|code|promo(?:code)?|coupon)\s*(?:>>|>|:|=-|–|—|=>|\s+)\s*([A-Za-z0-9._\-]{4,35})", text_no_http)
     if m and is_valid_promocode(m.group(1)):
         code = m.group(1).strip()
 
-    # Priority B: Domain-style promocode (spingoldg.com, winrummy.app, JAIHO777.COM)
     if not code:
         dom_match = re.search(r"\b([A-Za-z0-9._\-]+\.(?:com|app|win|vip|xyz|in|net|org))\b", text_no_http, re.IGNORECASE)
         if dom_match and is_valid_promocode(dom_match.group(1)):
             code = dom_match.group(1).strip()
 
-    # Priority C: Token with letters and numbers (Neta.Vip1749633)
     if not code:
         for t in re.findall(r"\b[A-Za-z0-9._\-]{5,25}\b", text_no_http):
             if is_valid_promocode(t) and any(c.isalpha() for c in t) and any(c.isdigit() for c in t):
@@ -61,7 +58,6 @@ def parse_promocode(text):
 
     if not code: return "", "", ""
 
-    # Game Name
     game = ""
     lbl = re.search(r"(?i)(?:game\s*name|game|app|application)\s*[:=\-–—>]\s*([^\n\r,]+)", text_no_http)
     if lbl:
@@ -84,10 +80,43 @@ def parse_promocode(text):
 
     return game, code, bonus
 
+def send_real_fcm_push(title, body, game_name, code):
+    """Sends real system push notification to ALL user phones via FCM HTTP v1"""
+    try:
+        r = requests.get(f"{FIREBASE_DB_URL}/admin_config/fcm/serviceAccountJson.json", timeout=10)
+        sa_raw = r.json()
+        if not sa_raw: return False
+        sa_info = json.loads(sa_raw) if isinstance(sa_raw, str) else sa_raw
+
+        from google.oauth2 import service_account
+        from google.auth.transport.requests import Request
+
+        creds = service_account.Credentials.from_service_account_info(
+            sa_info, scopes=["https://www.googleapis.com/auth/firebase.messaging"]
+        )
+        creds.refresh(Request())
+        access_token = creds.token
+        project_id = sa_info.get("project_id", "appstore-9d01f")
+
+        fcm_url = f"https://fcm.googleapis.com/v1/projects/{project_id}/messages:send"
+        headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
+        payload = {
+            "message": {
+                "topic": "all",
+                "notification": {"title": title, "body": body},
+                "data": {"click_action": "OPEN_SPECIAL_PROMO", "appName": game_name, "code": code, "type": "telegram_promocode"},
+                "android": {"priority": "HIGH", "notification": {"sound": "default", "channel_id": "yono_promos", "default_vibrate_timings": True}}
+            }
+        }
+        res = requests.post(fcm_url, headers=headers, json=payload, timeout=10)
+        print(f"📢 Real FCM Push Broadcast to all users: Status {res.status_code}")
+        return res.status_code == 200
+    except Exception as e:
+        print(f"⚠️ FCM Note: {e}")
+        return False
+
 def sync_to_firebase(game_name, code, bonus_amount, raw_text=""):
-    if not code or not game_name or not is_valid_promocode(code):
-        print(f"⚠️ Skipped invalid promo: Game='{game_name}', Code='{code}'")
-        return
+    if not code or not game_name or not is_valid_promocode(code): return
 
     now_ms = int(time.time() * 1000)
     expires_at = now_ms + (24 * 3600 * 1000)
@@ -129,17 +158,24 @@ def sync_to_firebase(game_name, code, bonus_amount, raw_text=""):
     requests.put(f"{FIREBASE_DB_URL}/bonus_offers/{offer_id}.json", json=offer_payload, timeout=10)
     requests.put(f"{FIREBASE_DB_URL}/promo_codes/{offer_id}.json", json=offer_payload, timeout=10)
 
+    notif_id = f"notif_{now_ms}"
     notif_payload = {
-        "id": f"notif_{now_ms}", "title": notif_title, "body": notif_body, "message": notif_body,
-        "appName": final_game_name, "timestamp": now_ms, "createdAt": now_ms, "read": False, "type": "telegram_promocode"
+        "id": notif_id, "title": notif_title, "body": notif_body, "message": notif_body,
+        "appName": final_game_name, "app_name": final_game_name, "code": code,
+        "bonus": bonus_amount, "bonus_amount": bonus_amount, "click_action": "OPEN_SPECIAL_PROMO",
+        "action": "OPEN_SPECIAL_PROMO", "deeplink": "yonostore://special_promo",
+        "timestamp": now_ms, "createdAt": now_ms, "read": False, "type": "telegram_promocode"
     }
-    requests.put(f"{FIREBASE_DB_URL}/notifications/notif_{now_ms}.json", json=notif_payload, timeout=10)
-    print(f"✅ Synced! Game='{final_game_name}', Code='{code}', Bonus='{bonus_amount}'")
+    requests.put(f"{FIREBASE_DB_URL}/notifications/{notif_id}.json", json=notif_payload, timeout=10)
+    requests.put(f"{FIREBASE_DB_URL}/latest_notification.json", json=notif_payload, timeout=10)
 
-@client.on(events.NewMessage(chats=[TARGET_CHANNEL_ID]))
-async def my_event_handler(event):
-    message_text = event.message.message or ""
-    print(f"\n📩 New message in private channel ({TARGET_CHANNEL_ID}):\n{message_text[:120]}...")
-    game, code, bonus = parse_promocode(message_text)
-    if code:
-        sync_to_firebase(game, code, bonus, message_text)
+    log_payload = {
+        "id": f"log_{now_ms}", "gameName": final_game_name, "promoCode": code, "bonusAmount": bonus_amount,
+        "type": "NEW GAME" if is_new else "UPDATED", "notificationTitle": notif_title, "timestamp": now_ms,
+        "channelId": TARGET_CHANNEL_ID, "success": True
+    }
+    requests.put(f"{FIREBASE_DB_URL}/telegram_sync_logs/log_{now_ms}.json", json=log_payload, timeout=10)
+    print(f"✅ Cleanly Synced! Game='{final_game_name}', Code='{code}', Bonus='{bonus_amount}'")
+
+    # Send REAL system push notification to ALL users
+    send_real_fcm_push(notif_title, notif_body, final_game_name, code)
