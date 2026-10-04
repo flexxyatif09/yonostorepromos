@@ -5,7 +5,7 @@ from telethon.sessions import StringSession
 
 API_ID = int(os.getenv("TELEGRAM_API_ID", "35254555"))
 API_HASH = os.getenv("TELEGRAM_API_HASH", "1648fb48b3afa30ff23e341d7ada0e56")
-TARGET_CHANNEL = os.getenv("TELEGRAM_TARGET_CHANNEL", "All Yono Earner")
+TARGET_CHANNEL_ID = int(os.getenv("TARGET_CHANNEL_ID", "-1001899529343"))
 FIREBASE_DB_URL = os.getenv("FIREBASE_DB_URL", "https://appstore-9d01f-default-rtdb.asia-southeast1.firebasedatabase.app")
 SESSION_STRING = os.getenv("TELEGRAM_SESSION_STRING", "").strip()
 
@@ -77,7 +77,7 @@ def parse_promocode(text):
 
     if not game:
         clean_cand = re.sub(r"\.(?:com|app|win|vip|xyz|in|net|org)$", "", code, flags=re.IGNORECASE)
-        game = clean_cand.title() if len(clean_cand) >= 3 else TARGET_CHANNEL
+        game = clean_cand.title() if len(clean_cand) >= 3 else "Special Promo Game"
 
     b_match = re.search(r"(?i)(?:bonus\s*upto|signup\s*bonus|bonus|amount|get|claim|free|upto)\s*[:=\-–—]?\s*(?:₹|Rs\.?|INR)?\s*([0-9]{1,5})", clean_text)
     bonus = f"₹{b_match.group(1)} ({now_time})" if b_match else f"₹50 ({now_time})"
@@ -135,3 +135,11 @@ def sync_to_firebase(game_name, code, bonus_amount, raw_text=""):
     }
     requests.put(f"{FIREBASE_DB_URL}/notifications/notif_{now_ms}.json", json=notif_payload, timeout=10)
     print(f"✅ Synced! Game='{final_game_name}', Code='{code}', Bonus='{bonus_amount}'")
+
+@client.on(events.NewMessage(chats=[TARGET_CHANNEL_ID]))
+async def my_event_handler(event):
+    message_text = event.message.message or ""
+    print(f"\n📩 New message in private channel ({TARGET_CHANNEL_ID}):\n{message_text[:120]}...")
+    game, code, bonus = parse_promocode(message_text)
+    if code:
+        sync_to_firebase(game, code, bonus, message_text)
