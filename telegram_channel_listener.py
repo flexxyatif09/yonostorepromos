@@ -37,7 +37,6 @@ def clean_game_name(raw):
 
 def parse_promocode(text):
     clean_text = text.strip()
-    now_time = datetime.now().strftime("%I:%M %p")
     text_no_http = re.sub(r"https?://\S+", " ", clean_text)
 
     code = ""
@@ -75,13 +74,12 @@ def parse_promocode(text):
         clean_cand = re.sub(r"\.(?:com|app|win|vip|xyz|in|net|org)$", "", code, flags=re.IGNORECASE)
         game = clean_cand.title() if len(clean_cand) >= 3 else "Special Promo Game"
 
-    b_match = re.search(r"(?i)(?:bonus\s*upto|signup\s*bonus|bonus|amount|get|claim|free|upto)\s*[:=\-–—]?\s*(?:₹|Rs\.?|INR)?\s*([0-9]{1,5})", clean_text)
-    bonus = f"₹{b_match.group(1)} ({now_time})" if b_match else f"₹50 ({now_time})"
+    # Strictly "Daily" tag
+    bonus = "Daily"
 
     return game, code, bonus
 
 def send_real_fcm_push(title, body, game_name, code):
-    """Sends real system push notification to ALL user phones via FCM HTTP v1"""
     try:
         r = requests.get(f"{FIREBASE_DB_URL}/admin_config/fcm/serviceAccountJson.json", timeout=10)
         sa_raw = r.json()
@@ -109,7 +107,7 @@ def send_real_fcm_push(title, body, game_name, code):
             }
         }
         res = requests.post(fcm_url, headers=headers, json=payload, timeout=10)
-        print(f"📢 Real FCM Push Broadcast to all users: Status {res.status_code}")
+        print(f"📢 Real FCM Push Broadcast: Status {res.status_code}")
         return res.status_code == 200
     except Exception as e:
         print(f"⚠️ FCM Note: {e}")
@@ -149,7 +147,7 @@ def sync_to_firebase(game_name, code, bonus_amount, raw_text=""):
     offer_payload = {
         "id": offer_id, "title": f"{final_game_name} Special Promo", "appName": final_game_name,
         "appId": existing_app_id, "iconUrl": existing_icon, "code": code,
-        "bonusAmount": bonus_amount, "description": f"Daily promo drops for {final_game_name}",
+        "bonusAmount": "Daily", "description": f"Daily promo drops for {final_game_name}",
         "claimUrl": "", "expiryDate": "Valid 24h ⏳", "minDeposit": "₹0 (Free Bonus)",
         "verified": True, "active": True, "order": 1, "dateAdded": now_ms,
         "expiryHours": 24, "expiresAt": expires_at
@@ -162,7 +160,7 @@ def sync_to_firebase(game_name, code, bonus_amount, raw_text=""):
     notif_payload = {
         "id": notif_id, "title": notif_title, "body": notif_body, "message": notif_body,
         "appName": final_game_name, "app_name": final_game_name, "code": code,
-        "bonus": bonus_amount, "bonus_amount": bonus_amount, "click_action": "OPEN_SPECIAL_PROMO",
+        "bonus": "Daily", "bonus_amount": "Daily", "click_action": "OPEN_SPECIAL_PROMO",
         "action": "OPEN_SPECIAL_PROMO", "deeplink": "yonostore://special_promo",
         "timestamp": now_ms, "createdAt": now_ms, "read": False, "type": "telegram_promocode"
     }
@@ -170,12 +168,11 @@ def sync_to_firebase(game_name, code, bonus_amount, raw_text=""):
     requests.put(f"{FIREBASE_DB_URL}/latest_notification.json", json=notif_payload, timeout=10)
 
     log_payload = {
-        "id": f"log_{now_ms}", "gameName": final_game_name, "promoCode": code, "bonusAmount": bonus_amount,
+        "id": f"log_{now_ms}", "gameName": final_game_name, "promoCode": code, "bonusAmount": "Daily",
         "type": "NEW GAME" if is_new else "UPDATED", "notificationTitle": notif_title, "timestamp": now_ms,
         "channelId": TARGET_CHANNEL_ID, "success": True
     }
     requests.put(f"{FIREBASE_DB_URL}/telegram_sync_logs/log_{now_ms}.json", json=log_payload, timeout=10)
-    print(f"✅ Cleanly Synced! Game='{final_game_name}', Code='{code}', Bonus='{bonus_amount}'")
+    print(f"✅ Cleanly Synced! Game='{final_game_name}', Code='{code}', Badge='Daily'")
 
-    # Send REAL system push notification to ALL users
     send_real_fcm_push(notif_title, notif_body, final_game_name, code)
