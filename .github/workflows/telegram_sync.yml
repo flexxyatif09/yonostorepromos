@@ -23,31 +23,43 @@ jobs:
       - name: Run Telegram Sync
         env:
           TELEGRAM_SESSION_STRING: ${{ secrets.TELEGRAM_SESSION_STRING }}
+          TARGET_CHANNEL_ID: -1001899529343
         run: |
           python -c '
           import os, asyncio
           from telethon import TelegramClient
           from telethon.sessions import StringSession
-          from telegram_channel_listener import parse_promocode, sync_to_firebase, TARGET_CHANNEL, API_ID, API_HASH
+          from telegram_channel_listener import parse_promocode, sync_to_firebase, TARGET_CHANNEL_ID, API_ID, API_HASH
 
           async def run():
               session = os.getenv("TELEGRAM_SESSION_STRING", "").strip()
               if not session:
-                  print("Error: TELEGRAM_SESSION_STRING is missing in Secrets!")
+                  print("❌ Error: TELEGRAM_SESSION_STRING is missing in Secrets!")
                   return
+
               client = TelegramClient(StringSession(session), API_ID, API_HASH)
               await client.start()
-              print("Connected to Telegram! Checking channel...")
-              async for dialog in client.iter_dialogs():
-                  if TARGET_CHANNEL.lower() in dialog.name.lower():
-                      async for msg in client.iter_messages(dialog.id, limit=5):
-                          text = msg.text or ""
-                          if not text: continue
-                          g, c, b = parse_promocode(text)
-                          if c:
-                              sync_to_firebase(g, c, b)
-                              break
-                      break
+              print(f"🟢 Connected to Telegram! Accessing Private Channel ID: {TARGET_CHANNEL_ID}...")
+
+              try:
+                  ch = await client.get_entity(TARGET_CHANNEL_ID)
+                  print(f"✅ Found Private Channel: \"{getattr(ch, \"title\", \"\")} \" (ID: {TARGET_CHANNEL_ID})")
+                  
+                  found_code = False
+                  async for msg in client.iter_messages(ch, limit=15):
+                      text = msg.message or msg.text or ""
+                      if not text.strip(): continue
+                      g, c, b = parse_promocode(text)
+                      if c:
+                          print(f"🎯 Extracted Code: {c} | Game: {g} | Bonus: {b}")
+                          sync_to_firebase(g, c, b, text)
+                          found_code = True
+                          break
+                  if not found_code:
+                      print("ℹ️ Checked last 15 messages in channel: No new valid promo code found right now.")
+              except Exception as e:
+                  print(f"❌ Error connecting to channel {TARGET_CHANNEL_ID}: {e}")
+
               await client.disconnect()
 
           asyncio.run(run())
