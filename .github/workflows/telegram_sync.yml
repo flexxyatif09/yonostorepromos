@@ -1,8 +1,7 @@
-name: 24/7 Telegram Promocode Auto-Sync
+name: Manual Telegram Promocode Sync (Backup)
 
+# Cron schedule disabled because Render.com is running 24/7 in real-time!
 on:
-  schedule:
-    - cron: '*/10 * * * *'
   workflow_dispatch:
 
 jobs:
@@ -54,13 +53,11 @@ jobs:
                       g, c, b, link = parse_promocode(text)
                       if c and c.upper() not in synced_codes:
                           synced_codes.add(c.upper())
-                          print(f"🎯 Extracted Code: \"{c}\" | Game: \"{g}\" | Link: \"{link[:35]}...\"")
+                          print(f"🎯 Checking Code: \"{c}\" | Game: \"{g}\"")
                           sync_to_firebase(g, c, b, link, text)
                           count += 1
                           
-                  print(f"🏁 Finished scanning: {count} valid promocodes synced & pushed!")
-                  if count == 0:
-                      print("ℹ️ Checked last 25 messages in channel: No valid promo codes found.")
+                  print(f"🏁 Finished scanning: {count} codes checked.")
               except Exception as e:
                   print(f"❌ Error connecting to channel {TARGET_CHANNEL_ID}: {e}")
 
