@@ -191,7 +191,7 @@ def sync_to_firebase(game_name: str, code: str, bonus_amount: str = "Daily", cla
 @client.on(events.NewMessage(chats=[TARGET_CHANNEL_ID]))
 async def my_event_handler(event):
     message_text = event.message.message or ""
-    print(f"\n📩 [REAL-TIME 0-SEC EVENT] New message in private channel ({TARGET_CHANNEL_ID}):\n{message_text[:120]}...")
+    print(f"\n📩 [REAL-TIME EVENT] New message in private channel ({TARGET_CHANNEL_ID}):\n{message_text[:120]}...")
     game, code, bonus, app_link = parse_promocode(message_text)
     if code:
         sync_to_firebase(game, code, bonus, app_link, message_text)
@@ -199,6 +199,7 @@ async def my_event_handler(event):
 async def main():
     print(f"🚀 Starting 24/7 Real-Time Telegram Promocode Bridge...")
     print(f"🔒 STRICTLY LOCKED to Private Channel ID: {TARGET_CHANNEL_ID}")
+    print("Connecting to Telegram...")
     if not SESSION_STRING:
         await client.start(phone=PHONE_NUMBER)
     else:
