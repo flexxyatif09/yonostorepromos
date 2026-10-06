@@ -23,60 +23,98 @@ threading.Thread(target=run_health_server, daemon=True).start()
 # Configuration
 API_ID = int(os.getenv("TELEGRAM_API_ID", "35254555"))
 API_HASH = os.getenv("TELEGRAM_API_HASH", "1648fb48b3afa30ff23e341d7ada0e56")
+PHONE_NUMBER = os.getenv("TELEGRAM_PHONE", "+918303094852")
 TARGET_CHANNEL_ID = int(os.getenv("TARGET_CHANNEL_ID", "-1001899529343"))
 FIREBASE_DB_URL = os.getenv("FIREBASE_DB_URL", "https://appstore-9d01f-default-rtdb.asia-southeast1.firebasedatabase.app")
 SESSION_STRING = os.getenv("TELEGRAM_SESSION_STRING", "").strip()
 
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 
+def should_ignore_post(text: str) -> tuple[bool, str]:
+    """Structure 4: Completely IGNORES bundled multi-code posts."""
+    lower = text.lower()
+    claim_count = len(re.findall(r"(?i)claim\s*(?:▶️|>>|>|:)", text))
+    if claim_count > 1:
+        return True, "Ignored: Multiple claim codes in single post (Structure 4)"
+    if re.search(r"\b\d+\s*(?:medium|small|big|extra)\s*promo", lower):
+        return True, "Ignored: Medium/Multi promocodes bundle (Structure 4)"
+    if "claim▶️" in lower or "prosafebet" in lower or "#free" in lower:
+        return True, "Ignored: Structure 4 pattern"
+    return False, ""
+
 def clean_game_name(raw: str) -> str:
-    s = re.sub(r"[🔥🎁⚡💥⭐✨🎉❤💞💎👑📢👉👉🏻👇👇🏻⤵️⤴️✅✓•\[\]\(\)😎🤑🤩🥳💰💵💳💸😱👌❤️]", " ", raw)
+    s = re.sub(r"[🔥🎁⚡💥⭐✨🎉❤💞💎👑📢👉👉🏻👇👇🏻⤵️⤴️✅✓•\[\]\(\)😎🤑🤩🥳💰💵💳💸😱👌❤️▶️😁👍🌚]", " ", raw)
     s = re.sub(r"[\*\_\~\`\|\#]+", " ", s)
-    s = re.sub(r"(?i)\s*(?:>|:|-|–|—)?\s*(?:new\s+promocode|new\s+promo\s*code|promocode|promo\s*code|game\s*name.*|code).*$", "", s)
+    s = re.sub(r"(?i)\s*(?:>|:|-|–|—)?\s*(?:new\s+promocode|new\s+promo\s*code|today\s+promocode|today\s+code|new\s+code|today\s*drop|promo\s*drop|promocode|promo\s*code|promo|game\s*name.*|coupon|code|loot).*$", "", s)
     s = re.sub(r"(?i)^claim\s*(?:>>|>|:|-|–|—)?", "", s)
     s = re.sub(r"^\W+", "", s)
     s = s.replace("-", " ").replace("_", " ")
     s = re.sub(r"\s+", " ", s).strip()
+    
+    # 🛡️ Structure 3: Strip promotional words like 'BIG', 'SUPER', 'MEGA', 'EXTRA', 'VIP', 'MEDIUM' from game name
+    s = re.sub(r"(?i)\b(?:big|super|mega|extra|medium|small|special)\b\s*$", "", s).strip()
+
     words = [w.capitalize() if not w.isdigit() else w for w in s.split()]
     return " ".join(words)
 
 def parse_promocode(text: str):
+    ignore, reason = should_ignore_post(text)
+    if ignore:
+        print(f"ℹ️ {reason}")
+        return "", "", "", ""
+
     clean_text = text.strip()
     lines = [l.strip() for l in clean_text.splitlines() if l.strip()]
     code, game, app_link = "", "", ""
 
+    # 1. Structure 1 & 2: Extract Code strictly from 'Claim >> ...'
     for line in lines:
-        m = re.search(r"(?i)^claim\s*(?:>>|>|:|=-|–|—|=>)\s*(.+)$", line)
+        cleaned_line = re.sub(r"^[^\w\s]+", "", line).strip()
+        m = re.search(r"(?i)(?:claim(?:\s*code)?|code|promo(?:\s*code)?|coupon)\s*(?:>>|>|:|=-|–|—|=>|\s+)\s*(.+)$", cleaned_line)
         if m:
             c = m.group(1).strip()
             c = re.sub(r"^[\*\"\'\`]+|[\*\"\'\`]+$", "", c).strip()
-            if not c.startswith("http://") and not c.startswith("https://") and len(c) >= 3:
+            c = re.sub(r"^https?://(?:www\.)?", "", c).strip()
+            if len(c) >= 3 and c.upper() not in ["UPTO", "SIGNUP", "BONUS", "FREE"]:
                 code = c
                 break
 
     if not code:
         text_no_http = re.sub(r"https?://\S+", " ", clean_text)
-        dom = re.search(r"\b([A-Za-z0-9._\-]+\.(?:com|app|win|vip|xyz|in|net|org|bet|diy|casino))\b", text_no_http, re.IGNORECASE)
-        if dom: code = dom.group(1).strip()
+        dom = re.search(r"\b([A-Za-z0-9._\-]+\.(?:com|app|win|vip|xyz|in|net|org|bet|diy|casino|co|top|games|io))\b", text_no_http, re.IGNORECASE)
+        if dom:
+            code = dom.group(1).strip()
 
     if not code or code.upper() in ["UPTO", "SIGNUP", "BONUS", "FREE"]:
         return "", "", "", ""
 
+    # 2. Extract App Link from 'App Link >> ...'
     for line in lines:
-        m_link = re.search(r"(?i)(?:app\s*link|link|download)\s*(?:>>|>|:|=-|–|—|=>)\s*(https?://\S+)", line)
+        cleaned_line = re.sub(r"^[^\w\s]+", "", line).strip()
+        m_link = re.search(r"(?i)(?:app\s*link|link|download)\s*(?:>>|>|:|=-|–|—|=>|\s+)\s*(https?://\S+)", cleaned_line)
         if m_link:
             app_link = m_link.group(1).strip()
             break
 
+    if not app_link:
+        any_link = re.search(r"(https?://\S+)", clean_text)
+        if any_link:
+            app_link = any_link.group(1).strip()
+
+    # 3. Extract Game Name (Strips 'BIG' cleanly)
     for line in lines:
-        if "promocode" in line.lower() or "promo code" in line.lower():
+        lower = line.lower()
+        if "promocode" in lower or "promo code" in lower or "code" in lower or "game" in lower:
             cand = clean_game_name(line)
-            if len(cand) >= 3:
+            if len(cand) >= 3 and cand.upper() != code.upper():
                 game = cand
                 break
 
-    if not game and lines: game = clean_game_name(lines[0])
-    if not game: game = "Special Promo Game"
+    if not game and lines:
+        game = clean_game_name(lines[0])
+
+    if not game:
+        game = "Special Promo Game"
 
     return game, code, "Daily", app_link
 
@@ -191,15 +229,16 @@ def sync_to_firebase(game_name: str, code: str, bonus_amount: str = "Daily", cla
 @client.on(events.NewMessage(chats=[TARGET_CHANNEL_ID]))
 async def my_event_handler(event):
     message_text = event.message.message or ""
-    print(f"\n📩 [REAL-TIME EVENT] New message in private channel ({TARGET_CHANNEL_ID}):\n{message_text[:120]}...")
+    print(f"\n📩 [NEW MESSAGE RECEIVED]:\n{message_text[:100]}...")
     game, code, bonus, app_link = parse_promocode(message_text)
     if code:
-        sync_to_firebase(game, code, bonus, app_link, message_text)
+        threading.Thread(target=sync_to_firebase, args=(game, code, bonus, app_link, message_text), daemon=True).start()
+    else:
+        print("ℹ️ Post skipped or did not contain a single valid promo code.")
 
 async def main():
     print(f"🚀 Starting 24/7 Real-Time Telegram Promocode Bridge...")
     print(f"🔒 STRICTLY LOCKED to Private Channel ID: {TARGET_CHANNEL_ID}")
-    print("Connecting to Telegram...")
     if not SESSION_STRING:
         await client.start(phone=PHONE_NUMBER)
     else:
@@ -211,7 +250,7 @@ async def main():
     except Exception as e:
         print(f"⚠️ Connected to Telegram. Listening to {TARGET_CHANNEL_ID} (Note: {e})")
 
-    print("🟢 ACTIVE & LISTENING 24/7! (Incoming messages trigger in 0.1s instant!)")
+    print("🟢 ACTIVE & LISTENING 24/7! (Multi-threaded parallel burst ready!)")
     await client.run_until_disconnected()
 
 if __name__ == "__main__":
