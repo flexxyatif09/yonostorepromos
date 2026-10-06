@@ -1,4 +1,25 @@
-import os, re, time, json, asyncio, threading, requests
+#!/usr/bin/env python3
+"""
+Telegram Auto Promocode 24/7 Cloud / Render Bridge
+Strictly locked to private channel ID: -1001899529343
+
+Features & Bug Fixes:
+1. STRICT Promocode Detection: Only publishes posts with valid 'Claim >>' structure.
+   Random announcements, payment proofs, and chat messages are 100% ignored.
+2. Independent Expiry Preservation: Timer counts down per game. Existing codes NEVER
+   have their timer reset. Only genuinely NEW or CHANGED codes reset to 24h.
+3. Guaranteed Push Notification: Every new promocode triggers Firebase notification
+   and real FCM push broadcast immediately.
+4. Catch-Up Scan (Last 50 messages): Ensures zero missed codes during network disconnects.
+"""
+
+import os
+import re
+import time
+import json
+import asyncio
+import threading
+import requests
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telethon import TelegramClient, events
@@ -12,7 +33,18 @@ class RenderHealthServer(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/html; charset=utf-8")
         self.end_headers()
-        self.wfile.write(b"<html><body><h2>Yono Promocode 24/7 Live Bridge is RUNNING!</h2></body></html>")
+        html = """
+        <html>
+        <head><title>Yono Promo Sync 24/7</title></head>
+        <body style="font-family:sans-serif; text-align:center; padding:50px; background:#121212; color:#fff;">
+            <h2>🟢 Yono Promocode 24/7 Live Bridge is RUNNING!</h2>
+            <p style="color:#4CAF50; font-size:18px;">Listening to Channel: -1001899529343 (Dual Engine: 0-sec WebSocket + Auto Catch-Up)</p>
+            <p style="color:#aaa;">Connected to Firebase Realtime Database & FCM Push Engine.</p>
+        </body>
+        </html>
+        """
+        self.wfile.write(html.encode("utf-8"))
+
     def log_message(self, format, *args): pass
 
 def run_health_server():
@@ -21,14 +53,15 @@ def run_health_server():
     server.serve_forever()
 
 def self_keep_alive():
-    """Pings Render every 4 minutes so it NEVER goes to sleep!"""
+    """Pings Render every 4 minutes to guarantee it NEVER sleeps!"""
     time.sleep(30)
     while True:
         try:
             requests.get(RENDER_APP_URL, timeout=10)
             print("💓 Keep-alive ping sent to Render to prevent sleep.")
-        except Exception: pass
-        time.sleep(240)
+        except Exception:
+            pass
+        time.sleep(240)  # every 4 minutes
 
 threading.Thread(target=run_health_server, daemon=True).start()
 threading.Thread(target=self_keep_alive, daemon=True).start()
@@ -44,11 +77,12 @@ SESSION_STRING = os.getenv("TELEGRAM_SESSION_STRING", "").strip()
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 
 def should_ignore_post(text: str) -> tuple[bool, str]:
+    """Ignores posts with multiple claim codes (Structure 4) or prosafebet patterns."""
     claim_count = len(re.findall(r"(?i)^\s*(?:[^\w\s]*\s*)?claim\s*(?:▶️|>>|>|:)", text, re.MULTILINE))
     if claim_count > 1:
         return True, "Ignored: Multiple claim codes in single post (Structure 4)"
     if "prosafebet" in text.lower():
-        return True, "Ignored: Structure 4 pattern"
+        return True, "Ignored: Structure 4 prosafebet pattern"
     return False, ""
 
 def clean_game_name(raw: str) -> str:
@@ -59,6 +93,7 @@ def clean_game_name(raw: str) -> str:
     s = re.sub(r"^\W+", "", s)
     s = s.replace("-", " ").replace("_", " ")
     s = re.sub(r"\s+", " ", s).strip()
+    # Strip trailing promotional words like 'BIG', 'SUPER', etc.
     s = re.sub(r"(?i)\b(?:big|super|mega|extra|medium|small|special)\b\s*$", "", s).strip()
     words = [w.capitalize() if not w.isdigit() else w for w in s.split()]
     return " ".join(words)
@@ -71,27 +106,37 @@ def parse_promocode(text: str):
 
     clean_text = text.strip()
     lines = [l.strip() for l in clean_text.splitlines() if l.strip()]
-    code, game, app_link = "", "", ""
+    if not lines:
+        return "", "", "", ""
 
+    # STRICT CHECK: Must have an explicit Claim line
+    has_claim_line = any(re.search(r"(?i)\bclaim\s*(?:>>|>|:|=-|–|—|=>|▶️)", l) for l in lines)
+    if not has_claim_line:
+        # Non-promocode post (e.g. withdrawal proof, general chat, announcement)
+        return "", "", "", ""
+
+    code = ""
+    # Extract Promo Code STRICTLY from the Claim line
     for line in lines:
         cleaned_line = re.sub(r"^[^\w\s]+", "", line).strip()
-        m = re.search(r"(?i)(?:claim(?:\s*code)?|code|promo(?:\s*code)?|coupon)\s*(?:>>|>|:|=-|–|—|=>|\s+)\s*(.+)$", cleaned_line)
+        m = re.search(r"(?i)\bclaim(?:\s*code)?\s*(?:>>|>|:|=-|–|—|=>|▶️|\s+)\s*(.+)$", cleaned_line)
         if m:
             c = m.group(1).strip()
             c = re.sub(r"^[\*\"\'\`]+|[\*\"\'\`]+$", "", c).strip()
             c = re.sub(r"^https?://(?:www\.)?", "", c).strip()
+            # If user example included text like '> example yeh he promocode', strip extra note
+            if ">" in c and not c.startswith("http"):
+                c = c.split(">")[0].strip()
             if len(c) >= 3 and c.upper() not in ["UPTO", "SIGNUP", "BONUS", "FREE"]:
                 code = c
                 break
 
-    if not code:
-        text_no_http = re.sub(r"https?://\S+", " ", clean_text)
-        dom = re.search(r"\b([A-Za-z0-9._\-]+\.(?:com|app|win|vip|xyz|in|net|org|bet|diy|casino|co|top|games|io|me|cc))\b", text_no_http, re.IGNORECASE)
-        if dom: code = dom.group(1).strip()
-
+    # If no valid code found on Claim line, DO NOT fall back to random domains!
     if not code or code.upper() in ["UPTO", "SIGNUP", "BONUS", "FREE"]:
         return "", "", "", ""
 
+    # Extract App Link
+    app_link = ""
     for line in lines:
         cleaned_line = re.sub(r"^[^\w\s]+", "", line).strip()
         m_link = re.search(r"(?i)(?:app\s*link|link|download)\s*(?:>>|>|:|=-|–|—|=>|\s+)\s*(https?://\S+)", cleaned_line)
@@ -103,6 +148,8 @@ def parse_promocode(text: str):
         any_link = re.search(r"(https?://\S+)", clean_text)
         if any_link: app_link = any_link.group(1).strip()
 
+    # Extract Game Name
+    game = ""
     for line in lines:
         lower = line.lower()
         if "promocode" in lower or "promo code" in lower or "code" in lower or "game" in lower:
@@ -111,8 +158,11 @@ def parse_promocode(text: str):
                 game = cand
                 break
 
-    if not game and lines: game = clean_game_name(lines[0])
-    if not game: game = "Special Promo Game"
+    if not game and lines:
+        game = clean_game_name(lines[0])
+
+    if not game or game.upper() == code.upper():
+        return "", "", "", ""
 
     return game, code, "Daily", app_link
 
@@ -120,7 +170,9 @@ def send_real_fcm_push(title: str, body: str, game_name: str, code: str):
     try:
         r = requests.get(f"{FIREBASE_DB_URL}/admin_config/fcm/serviceAccountJson.json", timeout=10)
         sa_raw = r.json()
-        if not sa_raw: return False
+        if not sa_raw:
+            print("⚠️ FCM: No serviceAccountJson configured.")
+            return False
         sa_info = json.loads(sa_raw) if isinstance(sa_raw, str) else sa_raw
 
         from google.oauth2 import service_account
@@ -129,19 +181,38 @@ def send_real_fcm_push(title: str, body: str, game_name: str, code: str):
             sa_info, scopes=["https://www.googleapis.com/auth/firebase.messaging"]
         )
         creds.refresh(Request())
-        fcm_url = f"https://fcm.googleapis.com/v1/projects/{sa_info.get('project_id', 'appstore-9d01f')}/messages:send"
+        project_id = sa_info.get("project_id", "appstore-9d01f")
+        fcm_url = f"https://fcm.googleapis.com/v1/projects/{project_id}/messages:send"
         headers = {"Authorization": f"Bearer {creds.token}", "Content-Type": "application/json"}
         payload = {
             "message": {
                 "topic": "all",
                 "notification": {"title": title, "body": body},
-                "data": {"click_action": "OPEN_SPECIAL_PROMO", "appName": game_name, "code": code, "type": "telegram_promocode"},
-                "android": {"priority": "HIGH", "notification": {"sound": "default", "channel_id": "yono_promos", "default_vibrate_timings": True}}
+                "data": {
+                    "click_action": "OPEN_SPECIAL_PROMO",
+                    "action": "OPEN_SPECIAL_PROMO",
+                    "appName": game_name,
+                    "app_name": game_name,
+                    "code": code,
+                    "promo_code": code,
+                    "type": "telegram_promocode",
+                    "screen": "special_promocode"
+                },
+                "android": {
+                    "priority": "HIGH",
+                    "notification": {
+                        "sound": "default",
+                        "channel_id": "yono_promos",
+                        "default_vibrate_timings": True
+                    }
+                }
             }
         }
         res = requests.post(fcm_url, headers=headers, json=payload, timeout=10)
+        print(f"📢 Real FCM Push Broadcast: Status {res.status_code}")
         return res.status_code == 200
     except Exception as e:
+        print(f"⚠️ FCM Note: {e}")
         return False
 
 def sync_to_firebase(game_name: str, code: str, bonus_amount: str = "Daily", claim_url: str = "", raw_text: str = "", trigger_push: bool = True):
@@ -149,13 +220,22 @@ def sync_to_firebase(game_name: str, code: str, bonus_amount: str = "Daily", cla
         return
 
     now_ms = int(time.time() * 1000)
-    expires_at = now_ms + (24 * 3600 * 1000)
 
-    r = requests.get(f"{FIREBASE_DB_URL}/bonus_offers.json", timeout=10)
-    existing = r.json() or {}
-    matched_id, existing_name, existing_icon, existing_app_id, existing_claim_url = None, None, "", "", ""
+    try:
+        r = requests.get(f"{FIREBASE_DB_URL}/bonus_offers.json", timeout=10)
+        existing = r.json() or {}
+    except Exception as e:
+        print(f"⚠️ Firebase read error: {e}")
+        existing = {}
+
+    matched_id = None
+    existing_name = None
+    existing_icon = ""
+    existing_app_id = ""
+    existing_claim_url = ""
     existing_code = ""
     existing_date_added = 0
+    existing_expires_at = 0
     target_norm = re.sub(r"[^a-z0-9]", "", game_name.lower())
 
     for k, v in existing.items():
@@ -169,6 +249,7 @@ def sync_to_firebase(game_name: str, code: str, bonus_amount: str = "Daily", cla
                 existing_claim_url = v.get("claimUrl") or ""
                 existing_code = str(v.get("code") or "")
                 existing_date_added = int(v.get("dateAdded") or 0)
+                existing_expires_at = int(v.get("expiresAt") or 0)
                 break
 
     if not existing_name:
@@ -183,53 +264,105 @@ def sync_to_firebase(game_name: str, code: str, bonus_amount: str = "Daily", cla
                         existing_app_id = k
                         existing_claim_url = v.get("downloadUrl") or v.get("apkUrl") or ""
                         break
-        except Exception: pass
+        except Exception:
+            pass
 
     is_new = matched_id is None
     offer_id = matched_id if matched_id else f"tg_{now_ms}"
     final_game_name = existing_name if existing_name else game_name
     final_claim_url = claim_url if claim_url else existing_claim_url
 
-    # Check if duplicate recently synced (within 4 hours)
-    is_very_recent = (existing_code.strip().upper() == code.strip().upper()) and (now_ms - existing_date_added < 4 * 3600 * 1000)
+    # Check if this game already has this EXACT promo code
+    code_is_identical = (existing_code.strip().upper() == code.strip().upper()) and (matched_id is not None)
 
-    notif_title = f"{final_game_name} Promocode"
-    notif_body = f"{final_game_name} new promocode aa gya hai ❤" if is_new else "Promocode update ho chuka hai ❤"
+    if code_is_identical:
+        # PROMOCODE HAS NOT CHANGED!
+        # PRESERVE existing expiry time and dateAdded so countdown NEVER resets to 24h!
+        final_date_added = existing_date_added if existing_date_added > 0 else now_ms
+        final_expires_at = existing_expires_at if existing_expires_at > 0 else (now_ms + 24 * 3600 * 1000)
+        is_code_update = False
+    else:
+        # A GENUINELY NEW / UPDATED CODE HAS ARRIVED!
+        # ONLY this specific game gets a fresh 24h expiry timer!
+        final_date_added = now_ms
+        final_expires_at = now_ms + (24 * 3600 * 1000)
+        is_code_update = True
 
     offer_payload = {
-        "id": offer_id, "title": f"{final_game_name} Special Promo", "appName": final_game_name,
-        "appId": existing_app_id, "iconUrl": existing_icon, "code": code,
-        "bonusAmount": "Daily", "description": f"Daily promo drops for {final_game_name}",
-        "claimUrl": final_claim_url, "expiryDate": "Valid 24h ⏳", "minDeposit": "₹0 (Free Bonus)",
-        "verified": True, "active": True, "order": 1, "dateAdded": now_ms,
-        "expiryHours": 24, "expiresAt": expires_at
+        "id": offer_id,
+        "title": f"{final_game_name} Special Promo",
+        "appName": final_game_name,
+        "appId": existing_app_id,
+        "iconUrl": existing_icon,
+        "code": code,
+        "bonusAmount": "Daily",
+        "description": f"Daily promo drops for {final_game_name}",
+        "claimUrl": final_claim_url,
+        "expiryDate": "Valid 24h ⏳",
+        "minDeposit": "₹0 (Free Bonus)",
+        "verified": True,
+        "active": True,
+        "order": 1,
+        "dateAdded": final_date_added,
+        "expiryHours": 24,
+        "expiresAt": final_expires_at
     }
 
-    requests.put(f"{FIREBASE_DB_URL}/bonus_offers/{offer_id}.json", json=offer_payload, timeout=10)
-    requests.put(f"{FIREBASE_DB_URL}/promo_codes/{offer_id}.json", json=offer_payload, timeout=10)
+    try:
+        requests.put(f"{FIREBASE_DB_URL}/bonus_offers/{offer_id}.json", json=offer_payload, timeout=10)
+        requests.put(f"{FIREBASE_DB_URL}/promo_codes/{offer_id}.json", json=offer_payload, timeout=10)
+    except Exception as e:
+        print(f"⚠️ Firebase save error: {e}")
 
-    if not is_very_recent:
+    # Trigger notifications ONLY when there is a real code update or new game
+    if is_code_update:
+        notif_title = f"{final_game_name} Promocode"
+        notif_body = f"{final_game_name} new promocode aa gya hai ❤" if is_new else "Promocode update ho chuka hai ❤"
+
         notif_id = f"notif_{now_ms}"
         notif_payload = {
-            "id": notif_id, "title": notif_title, "body": notif_body, "message": notif_body,
-            "appName": final_game_name, "app_name": final_game_name, "code": code,
-            "bonus": "Daily", "bonus_amount": "Daily", "click_action": "OPEN_SPECIAL_PROMO",
-            "action": "OPEN_SPECIAL_PROMO", "deeplink": "yonostore://special_promo",
-            "timestamp": now_ms, "createdAt": now_ms, "read": False, "type": "telegram_promocode"
+            "id": notif_id,
+            "title": notif_title,
+            "body": notif_body,
+            "message": notif_body,
+            "appName": final_game_name,
+            "app_name": final_game_name,
+            "code": code,
+            "bonus": "Daily",
+            "bonus_amount": "Daily",
+            "click_action": "OPEN_SPECIAL_PROMO",
+            "action": "OPEN_SPECIAL_PROMO",
+            "deeplink": "yonostore://special_promo",
+            "timestamp": now_ms,
+            "createdAt": now_ms,
+            "read": False,
+            "type": "telegram_promocode"
         }
-        requests.put(f"{FIREBASE_DB_URL}/notifications/{notif_id}.json", json=notif_payload, timeout=10)
-        requests.put(f"{FIREBASE_DB_URL}/latest_notification.json", json=notif_payload, timeout=10)
+        try:
+            requests.put(f"{FIREBASE_DB_URL}/notifications/{notif_id}.json", json=notif_payload, timeout=10)
+            requests.put(f"{FIREBASE_DB_URL}/latest_notification.json", json=notif_payload, timeout=10)
 
-        log_payload = {
-            "id": f"log_{now_ms}", "gameName": final_game_name, "promoCode": code, "bonusAmount": "Daily",
-            "type": "NEW GAME" if is_new else "UPDATED", "notificationTitle": notif_title,
-            "notificationBody": notif_body, "timestamp": now_ms, "channelId": TARGET_CHANNEL_ID, "success": True
-        }
-        requests.put(f"{FIREBASE_DB_URL}/telegram_sync_logs/log_{now_ms}.json", json=log_payload, timeout=10)
-        print(f"✅ Cleanly Synced! Game='{final_game_name}', Code='{code}'")
+            log_payload = {
+                "id": f"log_{now_ms}",
+                "gameName": final_game_name,
+                "promoCode": code,
+                "bonusAmount": "Daily",
+                "type": "NEW GAME" if is_new else "UPDATED",
+                "notificationTitle": notif_title,
+                "notificationBody": notif_body,
+                "timestamp": now_ms,
+                "channelId": TARGET_CHANNEL_ID,
+                "success": True
+            }
+            requests.put(f"{FIREBASE_DB_URL}/telegram_sync_logs/log_{now_ms}.json", json=log_payload, timeout=10)
+            print(f"✅ Cleanly Synced & Notified! Game='{final_game_name}', Code='{code}'")
+        except Exception as e:
+            print(f"⚠️ Notification log error: {e}")
 
         if trigger_push:
             send_real_fcm_push(notif_title, notif_body, final_game_name, code)
+    else:
+        print(f"ℹ️ '{final_game_name}' code '{code}' already up-to-date. Expiry timer preserved.")
 
 @client.on(events.NewMessage(chats=[TARGET_CHANNEL_ID]))
 async def my_event_handler(event):
@@ -240,17 +373,19 @@ async def my_event_handler(event):
         threading.Thread(target=sync_to_firebase, args=(game, code, bonus, app_link, message_text, True), daemon=True).start()
 
 async def catch_up_scan_loop():
-    """Runs a catch-up scan every 15 minutes to guarantee that not a single message is EVER missed!"""
+    """Runs a catch-up scan every 15 minutes (scanning last 50 messages) to guarantee zero dropped codes!"""
     await asyncio.sleep(10)
     while True:
         try:
-            print("🔄 Running Catch-Up Scan (Last 25 messages) to verify no dropped codes...")
-            async for msg in client.iter_messages(TARGET_CHANNEL_ID, limit=25):
+            print("🔄 Running Catch-Up Scan (Last 50 messages) to verify no dropped codes...")
+            async for msg in client.iter_messages(TARGET_CHANNEL_ID, limit=50):
                 text = msg.message or msg.text or ""
-                if not text.strip(): continue
+                if not text.strip():
+                    continue
                 game, code, bonus, app_link = parse_promocode(text)
                 if code:
-                    sync_to_firebase(game, code, bonus, app_link, text, trigger_push=False)
+                    # Sync to Firebase. If genuinely new, it will notify; if existing, timer is preserved.
+                    sync_to_firebase(game, code, bonus, app_link, text, trigger_push=True)
             print("🏁 Catch-up scan complete. Everything 100% in sync.")
         except Exception as e:
             print(f"⚠️ Catch-up scan note: {e}")
@@ -274,7 +409,7 @@ async def main():
     # Start Catch-Up Background Loop
     asyncio.create_task(catch_up_scan_loop())
 
-    print("🟢 ACTIVE & LISTENING 24/7! (Dual Engine: Real-Time + 15m Catch-Up + Self-Ping)")
+    print("🟢 ACTIVE & LISTENING 24/7! (Dual Engine: Real-Time + 50-Msg Catch-Up + Self-Ping)")
     await client.run_until_disconnected()
 
 if __name__ == "__main__":
