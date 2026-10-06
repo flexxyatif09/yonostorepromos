@@ -20,7 +20,7 @@ import json
 import asyncio
 import threading
 import requests
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
@@ -83,6 +83,12 @@ MAX_MSG_AGE_HOURS = 24          # isse purane messages ko catch-up ignore karega
 SYNC_LOCK = threading.Lock()    # live handler + catch-up ek saath run na ho (duplicate notification bug)
 PROCESSED_IDS = set()           # ek message ko sirf ek baar process karenge
 BAD_CODE_WORDS = {"UPTO", "SIGNUP", "BONUS", "FREE", "HERE", "NOW", "CLICK", "BELOW", "ABOVE", "LINK", "CLAIM", "DOWN"}
+
+IST = timezone(timedelta(hours=5, minutes=30))
+
+def day_key(ms: int) -> str:
+    """IST calendar day (raat 12 baje din badalta hai)."""
+    return datetime.fromtimestamp(ms / 1000, IST).strftime("%Y-%m-%d")
 
 def norm(x: str) -> str:
     return re.sub(r"[^a-z0-9]", "", str(x or "").lower())
@@ -287,6 +293,7 @@ def _sync_to_firebase(game_name, code, bonus_amount="Daily", claim_url="", raw_t
     existing_code = ""
     existing_date_added = 0
     existing_expires_at = 0
+    existing_notified_day = ""
     target_norm = re.sub(r"[^a-z0-9]", "", game_name.lower())
 
     for k, v in existing.items():
@@ -303,6 +310,7 @@ def _sync_to_firebase(game_name, code, bonus_amount="Daily", claim_url="", raw_t
                 existing_code = str(v.get("code") or "")
                 existing_date_added = int(v.get("dateAdded") or 0)
                 existing_expires_at = int(v.get("expiresAt") or 0)
+                existing_notified_day = str(v.get("lastNotifiedDay") or "")
                 break
 
     if not existing_name:
@@ -333,26 +341,30 @@ def _sync_to_firebase(game_name, code, bonus_amount="Daily", claim_url="", raw_t
     # Check if this game already has this EXACT promo code
     code_is_identical = (norm(existing_code) == norm(code)) and (matched_id is not None)
 
-    # Purana message (jo existing code se pehle ka hai) -> kuch mat karo, warna notification loop banta hai
-    if matched_id is not None and not code_is_identical and existing_date_added > 0 and base_ms <= existing_date_added:
-        print(f"ℹ️ Stale message ignored for '{final_game_name}' (newer code already saved).")
+    # Purana message (existing se pehle ka) -> kuch mat karo, warna notification loop banta hai
+    if matched_id is not None and existing_date_added > 0 and base_ms <= existing_date_added:
+        print(f"ℹ️ Stale/duplicate message ignored for '{final_game_name}'.")
         return
 
-    if code_is_identical:
-        # PROMOCODE HAS NOT CHANGED!
-        # PRESERVE existing expiry time and dateAdded so countdown NEVER resets to 24h!
-        final_date_added = existing_date_added if existing_date_added > 0 else now_ms
-        final_expires_at = existing_expires_at if existing_expires_at > 0 else (now_ms + 24 * 3600 * 1000)
-        is_code_update = False
-    else:
-        # A GENUINELY NEW / UPDATED CODE HAS ARRIVED!
-        # ONLY this specific game gets a fresh 24h expiry timer!
-        final_date_added = base_ms
-        final_expires_at = base_ms + (24 * 3600 * 1000)
-        if final_expires_at <= now_ms:
-            print(f"ℹ️ Code for '{final_game_name}' already expired, skipping.")
-            return
+    today = day_key(base_ms)
+    final_date_added = base_ms
+    final_expires_at = base_ms + (24 * 3600 * 1000)
+    if final_expires_at <= now_ms:
+        print(f"ℹ️ Code for '{final_game_name}' already expired, skipping.")
+        return
+
+    if not code_is_identical:
+        # NAYA / ALAG CODE -> timer reset + notification (jitni baar alag code aaye)
         is_code_update = True
+        final_notified_day = today
+    elif existing_notified_day != today:
+        # SAME CODE, par NAYA DIN -> timer reset + din me sirf 1 notification
+        is_code_update = True
+        final_notified_day = today
+    else:
+        # SAME CODE, SAME DIN (naya message) -> sirf timer refresh, notification NAHI
+        is_code_update = False
+        final_notified_day = existing_notified_day
 
     offer_payload = {
         "id": offer_id,
@@ -371,7 +383,8 @@ def _sync_to_firebase(game_name, code, bonus_amount="Daily", claim_url="", raw_t
         "order": 1,
         "dateAdded": final_date_added,
         "expiryHours": 24,
-        "expiresAt": final_expires_at
+        "expiresAt": final_expires_at,
+        "lastNotifiedDay": final_notified_day
     }
 
     try:
@@ -383,7 +396,7 @@ def _sync_to_firebase(game_name, code, bonus_amount="Daily", claim_url="", raw_t
     # Trigger notifications ONLY when there is a real code update or new game
     if is_code_update and notify:
         notif_title = f"{final_game_name} Promocode"
-        notif_body = f"{final_game_name} new promocode aa gya hai ❤" if is_new else "Promocode update ho chuka hai ❤"
+        notif_body = f"{final_game_name} new promocode aa gya hai ❤" if is_new else f"{final_game_name} promocode update ho chuka hai ❤"
 
         notif_id = f"notif_{now_ms}"
         notif_payload = {
