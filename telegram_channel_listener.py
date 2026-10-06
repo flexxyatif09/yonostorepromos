@@ -76,6 +76,48 @@ SESSION_STRING = os.getenv("TELEGRAM_SESSION_STRING", "").strip()
 
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 
+# ---- FIX CONFIG ----
+# Sirf wahi game accept hoga jo already apps / bonus_offers me hai (random "Yelo Claim" jaisa junk add nahi hoga)
+REQUIRE_KNOWN_GAME = os.getenv("REQUIRE_KNOWN_GAME", "true").lower() == "true"
+MAX_MSG_AGE_HOURS = 24          # isse purane messages ko catch-up ignore karega
+SYNC_LOCK = threading.Lock()    # live handler + catch-up ek saath run na ho (duplicate notification bug)
+PROCESSED_IDS = set()           # ek message ko sirf ek baar process karenge
+BAD_CODE_WORDS = {"UPTO", "SIGNUP", "BONUS", "FREE", "HERE", "NOW", "CLICK", "BELOW", "ABOVE", "LINK", "CLAIM", "DOWN"}
+
+def norm(x: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(x or "").lower())
+
+def is_valid_code(c: str) -> bool:
+    """Code me kam se kam 3 letters/digits hone chahiye, emoji/arrow-only code reject."""
+    if not c or len(c) > 60 or re.search(r"\s", c):
+        return False
+    if len(re.findall(r"[A-Za-z0-9]", c)) < 3:
+        return False
+    if c.upper() in BAD_CODE_WORDS:
+        return False
+    return True
+
+def load_processed_ids() -> bool:
+    """Firebase se processed message ids load karta hai. Returns True agar pehli baar run hai (empty)."""
+    try:
+        r = requests.get(f"{FIREBASE_DB_URL}/telegram_processed.json?shallow=true", timeout=10)
+        data = r.json() or {}
+        PROCESSED_IDS.update(str(k) for k in data.keys())
+        return len(data) == 0
+    except Exception as e:
+        print(f"⚠️ processed load error: {e}")
+        return False
+
+def mark_processed(msg_id):
+    key = str(msg_id)
+    if key in PROCESSED_IDS:
+        return
+    PROCESSED_IDS.add(key)
+    try:
+        requests.put(f"{FIREBASE_DB_URL}/telegram_processed/{key}.json", json=int(time.time() * 1000), timeout=10)
+    except Exception:
+        pass
+
 def should_ignore_post(text: str) -> tuple[bool, str]:
     """Ignores posts with multiple claim codes (Structure 4) or prosafebet patterns."""
     claim_count = len(re.findall(r"(?i)^\s*(?:[^\w\s]*\s*)?claim\s*(?:▶️|>>|>|:)", text, re.MULTILINE))
@@ -127,7 +169,7 @@ def parse_promocode(text: str):
             # If user example included text like '> example yeh he promocode', strip extra note
             if ">" in c and not c.startswith("http"):
                 c = c.split(">")[0].strip()
-            if len(c) >= 3 and c.upper() not in ["UPTO", "SIGNUP", "BONUS", "FREE"]:
+            if is_valid_code(c):
                 code = c
                 break
 
@@ -160,6 +202,10 @@ def parse_promocode(text: str):
 
     if not game and lines:
         game = clean_game_name(lines[0])
+
+    # "Yelo Claim" jaisa naam game nahi hota
+    if game and re.search(r"(?i)\bclaim\b", game):
+        return "", "", "", ""
 
     if not game or game.upper() == code.upper():
         return "", "", "", ""
@@ -215,11 +261,16 @@ def send_real_fcm_push(title: str, body: str, game_name: str, code: str):
         print(f"⚠️ FCM Note: {e}")
         return False
 
-def sync_to_firebase(game_name: str, code: str, bonus_amount: str = "Daily", claim_url: str = "", raw_text: str = "", trigger_push: bool = True):
-    if not code or not game_name or code.upper() in ["UPTO", "SIGNUP", "BONUS", "FREE"]:
+def sync_to_firebase(game_name: str, code: str, bonus_amount: str = "Daily", claim_url: str = "", raw_text: str = "", trigger_push: bool = True, msg_ts_ms: int = 0, notify: bool = True):
+    with SYNC_LOCK:
+        _sync_to_firebase(game_name, code, bonus_amount, claim_url, raw_text, trigger_push, msg_ts_ms, notify)
+
+def _sync_to_firebase(game_name, code, bonus_amount="Daily", claim_url="", raw_text="", trigger_push=True, msg_ts_ms=0, notify=True):
+    if not code or not game_name or not is_valid_code(code):
         return
 
     now_ms = int(time.time() * 1000)
+    base_ms = msg_ts_ms if msg_ts_ms > 0 else now_ms   # timer message ke time se chalega
 
     try:
         r = requests.get(f"{FIREBASE_DB_URL}/bonus_offers.json", timeout=10)
@@ -240,8 +291,10 @@ def sync_to_firebase(game_name: str, code: str, bonus_amount: str = "Daily", cla
 
     for k, v in existing.items():
         if isinstance(v, dict):
-            app_n = re.sub(r"[^a-z0-9]", "", str(v.get("appName") or v.get("app_name") or "").lower())
-            if target_norm and len(target_norm) >= 4 and app_n == target_norm:
+            app_n = norm(v.get("appName") or v.get("app_name") or "")
+            if "claim" in app_n:
+                continue  # purani junk entries ko match mat karo
+            if target_norm and len(target_norm) >= 4 and (app_n == target_norm or (len(app_n) >= 4 and (app_n in target_norm or target_norm in app_n))):
                 matched_id = k
                 existing_name = v.get("appName") or v.get("app_name")
                 existing_icon = v.get("iconUrl") or ""
@@ -267,13 +320,23 @@ def sync_to_firebase(game_name: str, code: str, bonus_amount: str = "Daily", cla
         except Exception:
             pass
 
+    # Game list me hai hi nahi -> ignore (junk / non-game post)
+    if REQUIRE_KNOWN_GAME and not existing_name:
+        print(f"🚫 Ignored: '{game_name}' known game nahi hai (apps/bonus_offers me nahi mila).")
+        return
+
     is_new = matched_id is None
     offer_id = matched_id if matched_id else f"tg_{now_ms}"
     final_game_name = existing_name if existing_name else game_name
     final_claim_url = claim_url if claim_url else existing_claim_url
 
     # Check if this game already has this EXACT promo code
-    code_is_identical = (existing_code.strip().upper() == code.strip().upper()) and (matched_id is not None)
+    code_is_identical = (norm(existing_code) == norm(code)) and (matched_id is not None)
+
+    # Purana message (jo existing code se pehle ka hai) -> kuch mat karo, warna notification loop banta hai
+    if matched_id is not None and not code_is_identical and existing_date_added > 0 and base_ms <= existing_date_added:
+        print(f"ℹ️ Stale message ignored for '{final_game_name}' (newer code already saved).")
+        return
 
     if code_is_identical:
         # PROMOCODE HAS NOT CHANGED!
@@ -284,8 +347,11 @@ def sync_to_firebase(game_name: str, code: str, bonus_amount: str = "Daily", cla
     else:
         # A GENUINELY NEW / UPDATED CODE HAS ARRIVED!
         # ONLY this specific game gets a fresh 24h expiry timer!
-        final_date_added = now_ms
-        final_expires_at = now_ms + (24 * 3600 * 1000)
+        final_date_added = base_ms
+        final_expires_at = base_ms + (24 * 3600 * 1000)
+        if final_expires_at <= now_ms:
+            print(f"ℹ️ Code for '{final_game_name}' already expired, skipping.")
+            return
         is_code_update = True
 
     offer_payload = {
@@ -315,7 +381,7 @@ def sync_to_firebase(game_name: str, code: str, bonus_amount: str = "Daily", cla
         print(f"⚠️ Firebase save error: {e}")
 
     # Trigger notifications ONLY when there is a real code update or new game
-    if is_code_update:
+    if is_code_update and notify:
         notif_title = f"{final_game_name} Promocode"
         notif_body = f"{final_game_name} new promocode aa gya hai ❤" if is_new else "Promocode update ho chuka hai ❤"
 
@@ -368,28 +434,43 @@ def sync_to_firebase(game_name: str, code: str, bonus_amount: str = "Daily", cla
 async def my_event_handler(event):
     message_text = event.message.message or ""
     print(f"\n📩 [NEW LIVE MESSAGE RECEIVED]:\n{message_text[:100]}...")
+    if str(event.message.id) in PROCESSED_IDS:
+        return
+    mark_processed(event.message.id)
     game, code, bonus, app_link = parse_promocode(message_text)
     if code:
-        threading.Thread(target=sync_to_firebase, args=(game, code, bonus, app_link, message_text, True), daemon=True).start()
+        ts = int(event.message.date.timestamp() * 1000)
+        threading.Thread(target=sync_to_firebase, args=(game, code, bonus, app_link, message_text, True, ts, True), daemon=True).start()
 
-async def catch_up_scan_loop():
-    """Runs a catch-up scan every 15 minutes (scanning last 50 messages) to guarantee zero dropped codes!"""
+async def catch_up_scan_loop(first_run: bool):
+    """Har 15 min me last 50 msgs check. Sirf NAYE (unprocessed) msgs, oldest-first, game ke hisaab se sirf latest code."""
     await asyncio.sleep(10)
     while True:
         try:
-            print("🔄 Running Catch-Up Scan (Last 50 messages) to verify no dropped codes...")
+            print("🔄 Running Catch-Up Scan...")
+            cutoff = time.time() - MAX_MSG_AGE_HOURS * 3600
+            latest_per_game = {}
+            fresh_msgs = []
             async for msg in client.iter_messages(TARGET_CHANNEL_ID, limit=50):
+                fresh_msgs.append(msg)
+            for msg in reversed(fresh_msgs):  # oldest -> newest
+                if str(msg.id) in PROCESSED_IDS:
+                    continue
+                mark_processed(msg.id)
                 text = msg.message or msg.text or ""
-                if not text.strip():
+                if not text.strip() or msg.date.timestamp() < cutoff:
                     continue
                 game, code, bonus, app_link = parse_promocode(text)
                 if code:
-                    # Sync to Firebase. If genuinely new, it will notify; if existing, timer is preserved.
-                    sync_to_firebase(game, code, bonus, app_link, text, trigger_push=True)
-            print("🏁 Catch-up scan complete. Everything 100% in sync.")
+                    latest_per_game[norm(game)] = (game, code, bonus, app_link, text, int(msg.date.timestamp() * 1000))
+            for game, code, bonus, app_link, text, ts in latest_per_game.values():
+                # first_run par silently sync (notification spam nahi)
+                sync_to_firebase(game, code, bonus, app_link, text, True, ts, notify=not first_run)
+            first_run = False
+            print("🏁 Catch-up scan complete.")
         except Exception as e:
             print(f"⚠️ Catch-up scan note: {e}")
-        await asyncio.sleep(900)  # every 15 minutes
+        await asyncio.sleep(900)
 
 async def main():
     print(f"🚀 Starting 24/7 Real-Time Telegram Promocode Bridge...")
@@ -407,7 +488,8 @@ async def main():
         print(f"⚠️ Connected to Telegram. Listening to {TARGET_CHANNEL_ID} (Note: {e})")
 
     # Start Catch-Up Background Loop
-    asyncio.create_task(catch_up_scan_loop())
+    first_run = load_processed_ids()
+    asyncio.create_task(catch_up_scan_loop(first_run))
 
     print("🟢 ACTIVE & LISTENING 24/7! (Dual Engine: Real-Time + 50-Msg Catch-Up + Self-Ping)")
     await client.run_until_disconnected()
