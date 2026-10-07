@@ -126,9 +126,6 @@ def mark_processed(msg_id):
 
 def should_ignore_post(text: str) -> tuple[bool, str]:
     """Ignores posts with multiple claim codes (Structure 4) or prosafebet patterns."""
-    claim_count = len(re.findall(r"(?i)^\s*(?:[^\w\s]*\s*)?claim\s*(?:▶️|>>|>|:)", text, re.MULTILINE))
-    if claim_count > 1:
-        return True, "Ignored: Multiple claim codes in single post (Structure 4)"
     if "prosafebet" in text.lower():
         return True, "Ignored: Structure 4 prosafebet pattern"
     return False, ""
@@ -175,9 +172,17 @@ def parse_promocode(text: str):
             # If user example included text like '> example yeh he promocode', strip extra note
             if ">" in c and not c.startswith("http"):
                 c = c.split(">")[0].strip()
+            if re.search(r"(?i)mail\s*box|inbox|check\s+mail", c):
+                continue
             if is_valid_code(c):
                 code = c
                 break
+
+    # Claim line me code nahi (jaise "Check Mail Box") -> App Link ke ?code=XXXX se lo
+    if not code:
+        m_param = re.search(r"[?&]code=([A-Za-z0-9]{4,30})", clean_text)
+        if m_param:
+            code = m_param.group(1)
 
     # If no valid code found on Claim line, DO NOT fall back to random domains!
     if not code or code.upper() in ["UPTO", "SIGNUP", "BONUS", "FREE"]:
