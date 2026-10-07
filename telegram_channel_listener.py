@@ -106,7 +106,7 @@ def is_valid_code(c: str) -> bool:
 def load_processed_ids() -> bool:
     """Firebase se processed message ids load karta hai. Returns True agar pehli baar run hai (empty)."""
     try:
-        r = requests.get(f"{FIREBASE_DB_URL}/telegram_processed.json?shallow=true", timeout=10)
+        r = requests.get(f"{FIREBASE_DB_URL}/telegram_processed_v2.json?shallow=true", timeout=10)
         data = r.json() or {}
         PROCESSED_IDS.update(str(k) for k in data.keys())
         return len(data) == 0
@@ -120,7 +120,7 @@ def mark_processed(msg_id):
         return
     PROCESSED_IDS.add(key)
     try:
-        requests.put(f"{FIREBASE_DB_URL}/telegram_processed/{key}.json", json=int(time.time() * 1000), timeout=10)
+        requests.put(f"{FIREBASE_DB_URL}/telegram_processed_v2/{key}.json", json=int(time.time() * 1000), timeout=10)
     except Exception:
         pass
 
@@ -274,7 +274,7 @@ def send_real_fcm_push(title: str, body: str, game_name: str, code: str):
 
 def sync_to_firebase(game_name: str, code: str, bonus_amount: str = "Daily", claim_url: str = "", raw_text: str = "", trigger_push: bool = True, msg_ts_ms: int = 0, notify: bool = True):
     with SYNC_LOCK:
-        _sync_to_firebase(game_name, code, bonus_amount, claim_url, raw_text, trigger_push, msg_ts_ms, notify)
+        return _sync_to_firebase(game_name, code, bonus_amount, claim_url, raw_text, trigger_push, msg_ts_ms, notify)
 
 def _sync_to_firebase(game_name, code, bonus_amount="Daily", claim_url="", raw_text="", trigger_push=True, msg_ts_ms=0, notify=True):
     if not code or not game_name or not is_valid_code(code):
@@ -336,7 +336,7 @@ def _sync_to_firebase(game_name, code, bonus_amount="Daily", claim_url="", raw_t
     # Game list me hai hi nahi -> ignore (junk / non-game post)
     if REQUIRE_KNOWN_GAME and not existing_name:
         print(f"🚫 Ignored: '{game_name}' known game nahi hai (apps/bonus_offers me nahi mila).")
-        return
+        return False
 
     is_new = matched_id is None
     offer_id = matched_id if matched_id else f"tg_{now_ms}"
@@ -448,17 +448,23 @@ def _sync_to_firebase(game_name, code, bonus_amount="Daily", claim_url="", raw_t
     else:
         print(f"ℹ️ '{final_game_name}' code '{code}' already up-to-date. Expiry timer preserved.")
 
+def process_live(msg_id, game, code, bonus, app_link, text, ts):
+    res = sync_to_firebase(game, code, bonus, app_link, text, True, ts, True)
+    if res is not False:      # unknown game me mark mat karo, taaki game add hone ke baad retry ho sake
+        mark_processed(msg_id)
+
 @client.on(events.NewMessage(chats=[TARGET_CHANNEL_ID]))
 async def my_event_handler(event):
     message_text = event.message.message or ""
     print(f"\n📩 [NEW LIVE MESSAGE RECEIVED]:\n{message_text[:100]}...")
     if str(event.message.id) in PROCESSED_IDS:
         return
-    mark_processed(event.message.id)
     game, code, bonus, app_link = parse_promocode(message_text)
-    if code:
-        ts = int(event.message.date.timestamp() * 1000)
-        threading.Thread(target=sync_to_firebase, args=(game, code, bonus, app_link, message_text, True, ts, True), daemon=True).start()
+    if not code:
+        print("ℹ️ Is post me valid game/code nahi mila (parser ne skip kiya).")
+        return
+    ts = int(event.message.date.timestamp() * 1000)
+    threading.Thread(target=process_live, args=(event.message.id, game, code, bonus, app_link, message_text, ts), daemon=True).start()
 
 async def catch_up_scan_loop(first_run: bool):
     """Har 15 min me last 50 msgs check. Sirf NAYE (unprocessed) msgs, oldest-first, game ke hisaab se sirf latest code."""
@@ -474,16 +480,22 @@ async def catch_up_scan_loop(first_run: bool):
             for msg in reversed(fresh_msgs):  # oldest -> newest
                 if str(msg.id) in PROCESSED_IDS:
                     continue
-                mark_processed(msg.id)
                 text = msg.message or msg.text or ""
                 if not text.strip() or msg.date.timestamp() < cutoff:
+                    mark_processed(msg.id)
                     continue
                 game, code, bonus, app_link = parse_promocode(text)
                 if code:
-                    latest_per_game[norm(game)] = (game, code, bonus, app_link, text, int(msg.date.timestamp() * 1000))
-            for game, code, bonus, app_link, text, ts in latest_per_game.values():
+                    key = norm(game)
+                    prev = latest_per_game.get(key)
+                    latest_per_game[key] = (game, code, bonus, app_link, text, int(msg.date.timestamp() * 1000), (prev[6] if prev else []) + [msg.id])
+                # code nahi mila to mark NAHI karte, taaki parser fix hone par dobara try ho
+            for game, code, bonus, app_link, text, ts, ids in latest_per_game.values():
                 # first_run par silently sync (notification spam nahi)
-                sync_to_firebase(game, code, bonus, app_link, text, True, ts, notify=not first_run)
+                res = sync_to_firebase(game, code, bonus, app_link, text, True, ts, notify=not first_run)
+                if res is not False:
+                    for i in ids:
+                        mark_processed(i)
             first_run = False
             print("🏁 Catch-up scan complete.")
         except Exception as e:
