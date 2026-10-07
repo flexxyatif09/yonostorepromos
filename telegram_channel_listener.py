@@ -100,7 +100,7 @@ def is_valid_code(c: str) -> bool:
     """Code me kam se kam 3 letters/digits hone chahiye, emoji/arrow-only code reject."""
     if c == MAILBOX_CODE:
         return True
-    if not c or len(c) > 60 or re.search(r"\s", c):
+    if not c or len(c) > 60 or len(c.split()) > 6:   # space allowed, par max 6 words
         return False
     if len(re.findall(r"[A-Za-z0-9]", c)) < 3:
         return False
@@ -169,9 +169,10 @@ def parse_promocode(text: str):
     # Extract Promo Code STRICTLY from the Claim line
     for line in lines:
         cleaned_line = re.sub(r"^[^\w\s]+", "", line).strip()
-        m = re.search(r"(?i)\bclaim(?:\s*code)?\s*(?:>>|>|:|=-|–|—|=>|▶️|\s+)\s*(.+)$", cleaned_line)
+        m = re.search(r"(?i)\bclaim(?:\s*code)?\s*(>>|>|:|=-|–|—|=>|▶️|\s+)\s*(.+)$", cleaned_line)
         if m:
-            c = m.group(1).strip()
+            explicit_sep = m.group(1).strip() != ""
+            c = re.sub(r"\s+", " ", m.group(2)).strip()
             c = re.sub(r"^[\*\"\'\`]+|[\*\"\'\`]+$", "", c).strip()
             c = re.sub(r"^https?://(?:www\.)?", "", c).strip()
             # If user example included text like '> example yeh he promocode', strip extra note
@@ -180,6 +181,9 @@ def parse_promocode(text: str):
             if MAILBOX_RE.search(c):
                 code = MAILBOX_CODE   # "Claim >> Check Mail Box" -> waisa hi app me promocode ban jayega
                 break
+            # Space wala code tabhi lo jab Claim ke baad ">>" / ">" / ":" jaisa clear separator ho
+            if " " in c and not explicit_sep:
+                continue
             if is_valid_code(c):
                 code = c
                 break
