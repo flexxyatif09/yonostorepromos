@@ -93,8 +93,13 @@ def day_key(ms: int) -> str:
 def norm(x: str) -> str:
     return re.sub(r"[^a-z0-9]", "", str(x or "").lower())
 
+MAILBOX_CODE = "Check Mail Box 💌"
+MAILBOX_RE = re.compile(r"(?i)mail\s*box|inbox|check\s+(?:your\s+)?(?:e-?)?mail")
+
 def is_valid_code(c: str) -> bool:
     """Code me kam se kam 3 letters/digits hone chahiye, emoji/arrow-only code reject."""
+    if c == MAILBOX_CODE:
+        return True
     if not c or len(c) > 60 or re.search(r"\s", c):
         return False
     if len(re.findall(r"[A-Za-z0-9]", c)) < 3:
@@ -172,13 +177,14 @@ def parse_promocode(text: str):
             # If user example included text like '> example yeh he promocode', strip extra note
             if ">" in c and not c.startswith("http"):
                 c = c.split(">")[0].strip()
-            if re.search(r"(?i)mail\s*box|inbox|check\s+mail", c):
-                continue
+            if MAILBOX_RE.search(c):
+                code = MAILBOX_CODE   # "Claim >> Check Mail Box" -> waisa hi app me promocode ban jayega
+                break
             if is_valid_code(c):
                 code = c
                 break
 
-    # Claim line me code nahi (jaise "Check Mail Box") -> App Link ke ?code=XXXX se lo
+    # Claim line me koi valid code nahi mila -> App Link ke ?code=XXXX se lo
     if not code:
         m_param = re.search(r"[?&]code=([A-Za-z0-9]{4,30})", clean_text)
         if m_param:
@@ -306,7 +312,7 @@ def _sync_to_firebase(game_name, code, bonus_amount="Daily", claim_url="", raw_t
             app_n = norm(v.get("appName") or v.get("app_name") or "")
             if "claim" in app_n:
                 continue  # purani junk entries ko match mat karo
-            if target_norm and len(target_norm) >= 4 and (app_n == target_norm or (len(app_n) >= 4 and (app_n in target_norm or target_norm in app_n))):
+            if target_norm and len(target_norm) >= 4 and app_n == target_norm:
                 matched_id = k
                 existing_name = v.get("appName") or v.get("app_name")
                 existing_icon = v.get("iconUrl") or ""
@@ -347,7 +353,8 @@ def _sync_to_firebase(game_name, code, bonus_amount="Daily", claim_url="", raw_t
     code_is_identical = (norm(existing_code) == norm(code)) and (matched_id is not None)
 
     # Purana message (existing se pehle ka) -> kuch mat karo, warna notification loop banta hai
-    if matched_id is not None and existing_date_added > 0 and base_ms <= existing_date_added:
+    existing_code_bad = matched_id is not None and not is_valid_code(existing_code)  # purana galat code (jaise 'Check Mail Box') ho to overwrite allowed
+    if matched_id is not None and not existing_code_bad and existing_date_added > 0 and base_ms <= existing_date_added:
         print(f"ℹ️ Stale/duplicate message ignored for '{final_game_name}'.")
         return
 
@@ -465,6 +472,17 @@ async def my_event_handler(event):
         return
     ts = int(event.message.date.timestamp() * 1000)
     threading.Thread(target=process_live, args=(event.message.id, game, code, bonus, app_link, message_text, ts), daemon=True).start()
+
+@client.on(events.MessageEdited(chats=[TARGET_CHANNEL_ID]))
+async def my_edit_handler(event):
+    """Admin ne post edit karke code sahi kiya ho to bhi pakad lo."""
+    text = event.message.message or ""
+    game, code, bonus, app_link = parse_promocode(text)
+    if not code:
+        return
+    print(f"✏️ Edited message detected: {game} -> {code}")
+    ts = int(time.time() * 1000)
+    threading.Thread(target=sync_to_firebase, args=(game, code, bonus, app_link, text, True, ts, True), daemon=True).start()
 
 async def catch_up_scan_loop(first_run: bool):
     """Har 15 min me last 50 msgs check. Sirf NAYE (unprocessed) msgs, oldest-first, game ke hisaab se sirf latest code."""
