@@ -233,7 +233,7 @@ def parse_promocode(text: str):
 
     return game, code, "Daily", app_link
 
-def send_real_fcm_push(title: str, body: str, game_name: str, code: str):
+def send_real_fcm_push(title: str, body: str, game_name: str, code: str, app_id: str = ""):
     try:
         r = requests.get(f"{FIREBASE_DB_URL}/admin_config/fcm/serviceAccountJson.json", timeout=10)
         sa_raw = r.json()
@@ -260,6 +260,8 @@ def send_real_fcm_push(title: str, body: str, game_name: str, code: str):
                     "action": "OPEN_SPECIAL_PROMO",
                     "appName": game_name,
                     "app_name": game_name,
+                    "appId": str(app_id or ""),
+                    "app_id": str(app_id or ""),
                     "code": code,
                     "promo_code": code,
                     "type": "telegram_promocode",
@@ -328,17 +330,20 @@ def _sync_to_firebase(game_name, code, bonus_amount="Daily", claim_url="", raw_t
                 existing_notified_day = str(v.get("lastNotifiedDay") or "")
                 break
 
-    if not existing_name:
+    # apps list se game dhundo: naam na mila ho YA appId khali ho (notification me appId chahiye)
+    if not existing_name or not existing_app_id:
         try:
             r_apps = requests.get(f"{FIREBASE_DB_URL}/apps.json", timeout=10)
             for k, v in (r_apps.json() or {}).items():
                 if isinstance(v, dict):
                     an = re.sub(r"[^a-z0-9]", "", str(v.get("name") or v.get("title") or "").lower())
                     if target_norm and len(target_norm) >= 4 and an == target_norm:
-                        existing_name = v.get("name") or v.get("title")
-                        existing_icon = v.get("iconUrl") or v.get("icon_url") or ""
-                        existing_app_id = k
-                        existing_claim_url = v.get("downloadUrl") or v.get("apkUrl") or ""
+                        if not existing_name:
+                            existing_name = v.get("name") or v.get("title")
+                            existing_icon = v.get("iconUrl") or v.get("icon_url") or ""
+                            existing_claim_url = v.get("downloadUrl") or v.get("apkUrl") or ""
+                        if not existing_app_id:
+                            existing_app_id = k
                         break
         except Exception:
             pass
@@ -429,6 +434,8 @@ def _sync_to_firebase(game_name, code, bonus_amount="Daily", claim_url="", raw_t
             "message": notif_body,
             "appName": final_game_name,
             "app_name": final_game_name,
+            "appId": existing_app_id,
+            "app_id": existing_app_id,
             "code": code,
             "bonus": "Daily",
             "bonus_amount": "Daily",
@@ -447,6 +454,7 @@ def _sync_to_firebase(game_name, code, bonus_amount="Daily", claim_url="", raw_t
             log_payload = {
                 "id": f"log_{now_ms}",
                 "gameName": final_game_name,
+                "appId": existing_app_id,
                 "promoCode": code,
                 "bonusAmount": "Daily",
                 "type": "NEW GAME" if is_new else "UPDATED",
@@ -462,7 +470,7 @@ def _sync_to_firebase(game_name, code, bonus_amount="Daily", claim_url="", raw_t
             print(f"⚠️ Notification log error: {e}")
 
         if trigger_push:
-            send_real_fcm_push(notif_title, notif_body, final_game_name, code)
+            send_real_fcm_push(notif_title, notif_body, final_game_name, code, existing_app_id)
     else:
         print(f"ℹ️ '{final_game_name}' same code, same day: timer refreshed, notification skipped.")
 
