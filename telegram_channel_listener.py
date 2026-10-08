@@ -282,11 +282,11 @@ def send_real_fcm_push(title: str, body: str, game_name: str, code: str):
         print(f"⚠️ FCM Note: {e}")
         return False
 
-def sync_to_firebase(game_name: str, code: str, bonus_amount: str = "Daily", claim_url: str = "", raw_text: str = "", trigger_push: bool = True, msg_ts_ms: int = 0, notify: bool = True):
+def sync_to_firebase(game_name: str, code: str, bonus_amount: str = "Daily", claim_url: str = "", raw_text: str = "", trigger_push: bool = True, msg_ts_ms: int = 0, notify: bool = True, edit_mode: bool = False):
     with SYNC_LOCK:
-        return _sync_to_firebase(game_name, code, bonus_amount, claim_url, raw_text, trigger_push, msg_ts_ms, notify)
+        return _sync_to_firebase(game_name, code, bonus_amount, claim_url, raw_text, trigger_push, msg_ts_ms, notify, edit_mode)
 
-def _sync_to_firebase(game_name, code, bonus_amount="Daily", claim_url="", raw_text="", trigger_push=True, msg_ts_ms=0, notify=True):
+def _sync_to_firebase(game_name, code, bonus_amount="Daily", claim_url="", raw_text="", trigger_push=True, msg_ts_ms=0, notify=True, edit_mode=False):
     if not code or not game_name or not is_valid_code(code):
         return
 
@@ -358,7 +358,14 @@ def _sync_to_firebase(game_name, code, bonus_amount="Daily", claim_url="", raw_t
 
     # Purana message (existing se pehle ka) -> kuch mat karo, warna notification loop banta hai
     existing_code_bad = matched_id is not None and not is_valid_code(existing_code)  # purana galat code (jaise 'Check Mail Box') ho to overwrite allowed
-    if matched_id is not None and not existing_code_bad and existing_date_added > 0 and base_ms <= existing_date_added:
+    if edit_mode:
+        # EDIT: sirf tab jab code SACH me badla ho (correction). Same code ya purani post ka edit -> kuch nahi (timer reset nahi)
+        if matched_id is None or code_is_identical:
+            return
+        if existing_date_added > 0 and base_ms < existing_date_added:
+            print(f"ℹ️ Edit of an older post ignored for '{final_game_name}'.")
+            return
+    elif matched_id is not None and not existing_code_bad and existing_date_added > 0 and base_ms <= existing_date_added:
         print(f"ℹ️ Stale/duplicate message ignored for '{final_game_name}'.")
         return
 
@@ -457,7 +464,7 @@ def _sync_to_firebase(game_name, code, bonus_amount="Daily", claim_url="", raw_t
         if trigger_push:
             send_real_fcm_push(notif_title, notif_body, final_game_name, code)
     else:
-        print(f"ℹ️ '{final_game_name}' code '{code}' already up-to-date. Expiry timer preserved.")
+        print(f"ℹ️ '{final_game_name}' same code, same day: timer refreshed, notification skipped.")
 
 def process_live(msg_id, game, code, bonus, app_link, text, ts):
     res = sync_to_firebase(game, code, bonus, app_link, text, True, ts, True)
@@ -479,14 +486,16 @@ async def my_event_handler(event):
 
 @client.on(events.MessageEdited(chats=[TARGET_CHANNEL_ID]))
 async def my_edit_handler(event):
-    """Admin ne post edit karke code sahi kiya ho to bhi pakad lo."""
+    """Admin ne post edit karke code BADLA ho to pakad lo. Same code / purani post ka edit timer reset NAHI karega."""
+    msg_ts = event.message.date.timestamp()
+    if msg_ts < time.time() - MAX_MSG_AGE_HOURS * 3600:
+        return
     text = event.message.message or ""
     game, code, bonus, app_link = parse_promocode(text)
     if not code:
         return
-    print(f"✏️ Edited message detected: {game} -> {code}")
-    ts = int(time.time() * 1000)
-    threading.Thread(target=sync_to_firebase, args=(game, code, bonus, app_link, text, True, ts, True), daemon=True).start()
+    ts = int(msg_ts * 1000)
+    threading.Thread(target=sync_to_firebase, args=(game, code, bonus, app_link, text, True, ts, True, True), daemon=True).start()
 
 async def catch_up_scan_loop(first_run: bool):
     """Har 15 min me last 50 msgs check. Sirf NAYE (unprocessed) msgs, oldest-first, game ke hisaab se sirf latest code."""
