@@ -129,6 +129,54 @@ def mark_processed(msg_id):
     except Exception:
         pass
 
+# ---- APNE CHANNEL ME AUTO-PUBLISH ----
+PUBLISH_BOT_TOKEN = os.getenv("PUBLISH_BOT_TOKEN", "").strip()
+PUBLISH_CHANNEL_ID = os.getenv("PUBLISH_CHANNEL_ID", "").strip()   # @mychannel ya -100xxxxxxxxxx
+PUBLISH_IMAGE_URL = os.getenv("PUBLISH_IMAGE_URL", "").strip()     # har post par same image (optional, direct image link)
+STORE_LINK_BASE = os.getenv("STORE_LINK_BASE", "https://yonostore.free.nf/?app=")
+
+def _html_escape(t: str) -> str:
+    return str(t).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+def publish_to_channel(game_name: str, code: str, app_id: str):
+    """Promocode update/notification ke saath apne Telegram channel me post. Fail ho to bot par koi asar nahi."""
+    try:
+        if not PUBLISH_BOT_TOKEN or not PUBLISH_CHANNEL_ID:
+            return
+        if PUBLISH_CHANNEL_ID.lstrip("@").lower() == str(TARGET_CHANNEL_ID).lower():
+            print("⚠️ PUBLISH_CHANNEL_ID source channel jaisa hai, loop se bachne ke liye skip.")
+            return
+        lines = [
+            f"🎁 <b>{_html_escape(game_name)}</b> — New Promocode",
+            f"Code: <code>{_html_escape(code)}</code>",
+        ]
+        if app_id:
+            lines.append("")
+            lines.append("👇 Claim / Download")
+            lines.append(f"{STORE_LINK_BASE}{app_id}")
+        text = "\n".join(lines)
+
+        api = f"https://api.telegram.org/bot{PUBLISH_BOT_TOKEN}"
+        sent = False
+        if PUBLISH_IMAGE_URL:
+            r = requests.post(f"{api}/sendPhoto", json={
+                "chat_id": PUBLISH_CHANNEL_ID, "photo": PUBLISH_IMAGE_URL,
+                "caption": text, "parse_mode": "HTML"}, timeout=15)
+            sent = r.ok
+            if not sent:
+                print(f"⚠️ Channel photo post failed ({r.status_code}), text post try karte hain.")
+        if not sent:
+            r = requests.post(f"{api}/sendMessage", json={
+                "chat_id": PUBLISH_CHANNEL_ID, "text": text, "parse_mode": "HTML",
+                "disable_web_page_preview": False}, timeout=15)
+            sent = r.ok
+            if not sent:
+                print(f"⚠️ Channel post failed: {r.status_code} {r.text[:150]}")
+        if sent:
+            print(f"📣 Channel post sent: {game_name}")
+    except Exception as e:
+        print(f"⚠️ Channel publish error: {e}")
+
 def should_ignore_post(text: str) -> tuple[bool, str]:
     """Ignores posts with multiple claim codes (Structure 4) or prosafebet patterns."""
     if "prosafebet" in text.lower():
@@ -471,6 +519,9 @@ def _sync_to_firebase(game_name, code, bonus_amount="Daily", claim_url="", raw_t
 
         if trigger_push:
             send_real_fcm_push(notif_title, notif_body, final_game_name, code, existing_app_id)
+
+        # Apne channel me post (alag thread, fail hone par kuch nahi rukega)
+        threading.Thread(target=publish_to_channel, args=(final_game_name, code, existing_app_id), daemon=True).start()
     else:
         print(f"ℹ️ '{final_game_name}' same code, same day: timer refreshed, notification skipped.")
 
